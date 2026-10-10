@@ -1,10 +1,13 @@
+import asyncio
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
 # ========== CONFIGURATION ==========
-BOT_TOKEN = "8854246490:AAFsdSKu1F5yCYdIEfL3MOS29m0BIMDOupE"  # Replace with your bot token from @BotFather
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ========== SETUP LOGGING ==========
 logging.basicConfig(
@@ -63,31 +66,6 @@ STUDENT_DATA = [
     {"Student ID": "NSR/0833/16", "FirstName": "YASSIN", "Fath.Name": "MOHAMMED", "GF.Name": "HASSEN", "Sex": "M", "Ass": 19, "ME": 24.5, "FE": 25.5, "Sum": 69},
 ]
 
-# ========== SEARCH FUNCTION ==========
-def search_student(query):
-    """Search for a student by ID or name (case-insensitive)"""
-    query = query.strip().upper()
-    results = []
-    
-    for student in STUDENT_DATA:
-        # Search by ID
-        if query in student["Student ID"].upper():
-            results.append(student)
-            continue
-        
-        # Search by First Name
-        if query in student["FirstName"].upper():
-            results.append(student)
-            continue
-        
-        # Search by Full Name (First + Father)
-        full_name = f"{student['FirstName']} {student['Fath.Name']}".upper()
-        if query in full_name:
-            results.append(student)
-            continue
-    
-    return results
-
 # ========== FORMAT RESULT ==========
 def format_student_result(student):
     """Format a single student's result as a Telegram message"""
@@ -124,92 +102,120 @@ def format_student_result(student):
 
 # ========== BOT COMMANDS ==========
 
+def is_private_chat(update: Update) -> bool:
+    """Keep student credentials and results out of group chats."""
+    return update.effective_chat is not None and update.effective_chat.type == "private"
+
 async def start(update: Update, context: CallbackContext):
-    """Send welcome message."""
-    welcome_text = """
-🎓 <b>Student Result Bot</b>
+    """Begin student sign-in."""
+    if not is_private_chat(update):
+        await update.effective_message.reply_text("Please message me privately to sign in.")
+        return
 
-Welcome! I can help you check student results.
-
-<b>How to use:</b>
-• Send a <b>Student ID</b> (e.g., NSR/0036/16)
-• Send a <b>First Name</b> (e.g., ABINET)
-• Send a <b>Full Name</b> (e.g., ABINET BELEYNEH)
-
-I'll show you the student's complete result! 📊
-"""
-    await update.message.reply_text(welcome_text, parse_mode="HTML")
+    context.user_data.clear()
+    context.user_data["login_step"] = "student_id"
+    await update.effective_message.reply_text(
+        "🎓 <b>Student Result Bot</b>\n\n"
+        "To sign in, send your Student ID. I’ll then ask for your first name "
+        "using the spelling shown in your school record.",
+        parse_mode="HTML",
+    )
 
 async def help_command(update: Update, context: CallbackContext):
     """Send help message."""
     help_text = """
 <b>📖 Help</b>
 
-<b>Search by:</b>
-• Student ID: <code>NSR/0036/16</code>
-• First Name: <code>ABINET</code>
-• Full Name: <code>ABINET BELEYNEH</code>
-
 <b>Commands:</b>
-/start - Welcome
-/help - This help
-
-<b>Example:</b>
-Send <code>NSR/0036/16</code> to see ABINET's result.
+/start - Sign in with your Student ID and first name
+/result - Show your result after signing in
+/logout - Sign out
+/help - Show this help
 """
-    await update.message.reply_text(help_text, parse_mode="HTML")
+    if not is_private_chat(update):
+        await update.effective_message.reply_text("Please message me privately.")
+        return
+    await update.effective_message.reply_text(help_text, parse_mode="HTML")
+
+async def result_command(update: Update, context: CallbackContext):
+    """Show the result belonging to the signed-in student."""
+    if not is_private_chat(update):
+        await update.effective_message.reply_text("Please message me privately.")
+        return
+
+    student_id = context.user_data.get("authenticated_student_id")
+    student = next(
+        (item for item in STUDENT_DATA if item["Student ID"] == student_id),
+        None,
+    )
+    if student is None:
+        await update.effective_message.reply_text("Please sign in first with /start.")
+        return
+    await update.effective_message.reply_text(
+        format_student_result(student), parse_mode="HTML"
+    )
+
+async def logout_command(update: Update, context: CallbackContext):
+    """Clear the current user's sign-in state."""
+    if not is_private_chat(update):
+        await update.effective_message.reply_text("Please message me privately.")
+        return
+
+    context.user_data.clear()
+    await update.effective_message.reply_text("You are signed out. Use /start to sign in again.")
 
 async def handle_message(update: Update, context: CallbackContext):
-    """Handle user messages."""
-    query = update.message.text.strip()
-    
-    if not query:
-        await update.message.reply_text("Please enter a name or ID to search.")
+    """Handle the two-step student sign-in."""
+    if not is_private_chat(update):
+        await update.effective_message.reply_text("Please message me privately to sign in.")
         return
-    
-    results = search_student(query)
-    
-    if not results:
-        await update.message.reply_text(
-            f"❌ No student found with: <b>{query}</b>\n\n"
-            "Please check the spelling or try a different search.",
-            parse_mode="HTML"
-        )
-        return
-    
-    if len(results) == 1:
-        student = results[0]
-        message = format_student_result(student)
-        await update.message.reply_text(message, parse_mode="HTML")
-    else:
-        response = f"🔍 Found <b>{len(results)}</b> student(s):\n\n"
-        
-        keyboard = []
-        for student in results[:10]:
-            button_text = f"{student['FirstName']} {student['Fath.Name']}"
-            callback_data = f"view_{student['Student ID']}"
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-        
-        if len(results) > 10:
-            response += f"\n<i>(Showing first 10 of {len(results)})</i>"
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(response, parse_mode="HTML", reply_markup=reply_markup)
 
-async def button_callback(update: Update, context: CallbackContext):
-    """Handle button clicks."""
-    query = update.callback_query
-    await query.answer()
-    
-    student_id = query.data.replace("view_", "")
-    
-    for student in STUDENT_DATA:
-        if student["Student ID"] == student_id:
-            message = format_student_result(student)
-            await query.edit_message_text(message, parse_mode="HTML")
+    message = update.effective_message
+    value = message.text.strip()
+    if not value:
+        await message.reply_text("Please send your Student ID or first name.")
+        return
+
+    login_step = context.user_data.get("login_step")
+    if login_step == "student_id":
+        student = next(
+            (
+                item
+                for item in STUDENT_DATA
+                if item["Student ID"].casefold() == value.casefold()
+            ),
+            None,
+        )
+        if student is None:
+            await message.reply_text("Student ID not recognized. Check it and try again, or use /start.")
             return
-    
-    await query.edit_message_text("❌ Student not found.")
+        context.user_data["pending_student_id"] = student["Student ID"]
+        context.user_data["login_step"] = "first_name"
+        await message.reply_text("Now send your first name with the spelling in your school record.")
+        return
+
+    if login_step == "first_name":
+        student_id = context.user_data.get("pending_student_id")
+        student = next(
+            (item for item in STUDENT_DATA if item["Student ID"] == student_id),
+            None,
+        )
+        if student is None or student["FirstName"].casefold() != value.casefold():
+            context.user_data.clear()
+            await message.reply_text("The details did not match. Use /start to try signing in again.")
+            return
+
+        context.user_data.clear()
+        context.user_data["authenticated_student_id"] = student["Student ID"]
+        await message.reply_text("✅ Signed in. Here is your result:")
+        await message.reply_text(format_student_result(student), parse_mode="HTML")
+        return
+
+    if context.user_data.get("authenticated_student_id"):
+        await message.reply_text("You are signed in. Use /result to view your result or /logout to sign out.")
+        return
+
+    await message.reply_text("Please use /start to sign in with your Student ID and first name.")
 
 # ========== FIX FOR SSL ERROR ==========
 def fix_ssl_issue():
@@ -236,6 +242,9 @@ def fix_ssl_issue():
 # ========== MAIN ==========
 def main():
     """Start the bot."""
+    if not BOT_TOKEN:
+        raise RuntimeError("Set the BOT_TOKEN environment variable before starting the bot.")
+
     # Fix SSL issue first
     fix_ssl_issue()
     
@@ -262,12 +271,14 @@ def main():
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("result", result_command))
+    application.add_handler(CommandHandler("logout", logout_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(button_callback))
     
     # Start bot
     print("🤖 Student Result Bot is running...")
     print("Press Ctrl+C to stop.")
+    asyncio.set_event_loop(asyncio.new_event_loop())
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
